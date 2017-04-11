@@ -270,23 +270,36 @@ struct _mh(t) {
 
 	uint32_t resize_position, resize_batch;
 	struct mhash_t *shadow;
-	void *(*realloc)(void *, size_t);
+
 #ifdef mh_arg_t
+	void *(*realloc)(mh_arg_t, void *, size_t);
 	mh_arg_t arg;
+#else
+	void *(*realloc)(void *, size_t);
 #endif
 };
 
 /* public api */
+#ifdef mh_arg_t
+MH_DECL struct mhash_t * _mh(init)(void *(*custom_realloc)(mh_arg_t, void *, size_t), mh_arg_t arg);
+MH_DECL void _mh(initialize)(struct mhash_t *h, mh_arg_t arg);
+#else
 MH_DECL struct mhash_t * _mh(init)(void *(*custom_realloc)(void *, size_t));
 MH_DECL void _mh(initialize)(struct mhash_t *h);
+#endif
 MH_DECL void _mh(destroy)(struct mhash_t *h);
 MH_DECL void _mh(destruct)(struct mhash_t *h); /* doesn't free hash itself */
 MH_DECL void _mh(clear)(struct mhash_t *h);
 MH_DECL size_t _mh(bytes)(struct mhash_t *h);
-#define mh_size(h)		({ (h)->size; 		})
+#define mh_size(h)		({ (h)->size;		})
 #define mh_begin(h)		({ 0;	})
 #define mh_end(h)		({ (h)->n_mask + 1;	})
 #define mh_foreach(name, h, x)	for (uint32_t x = 0; x <= (h)->n_mask; x++) if (mh_ecat(name, slot_occupied)(h, x))
+
+#ifdef mh_arg_t
+#define mh_arg(h)		({ (h)->arg;		})
+#define mh_setarg(h, val)	(h)->arg = (val)
+#endif
 
 /* basic */
 static inline uint32_t _mh(get)(const struct mhash_t *h, mh_key_t const key);
@@ -336,13 +349,31 @@ MH_DECL void _mh(start_resize)(struct mhash_t *h, uint32_t buckets);
 static inline void _mh(slot_copy)(struct mhash_t *d, uint32_t dx, mh_slot_t const *source);
 MH_DECL void _mh(slot_copy_to_shadow)(struct mhash_t *h, uint32_t o, int exist);
 
-#define mh_malloc(h, size) (h)->realloc(NULL, (size))
-#define mh_calloc(h, nmemb, size) ({			\
+#ifdef mh_arg_t
+# define mh_calloc(h, nmemb, size) ({				\
+	size_t __size = (size) * (nmemb);			\
+	void *__ptr;						\
+	if ((h)->realloc)					\
+		__ptr = (h)->realloc((h)->arg, NULL, __size);	\
+	else							\
+		__ptr = realloc(NULL, __size);			\
+	memset(__ptr, 0, __size);				\
+	__ptr; })
+# define mh_free(h, ptr) ({					\
+	void *__ptr;						\
+	if ((h)->realloc)					\
+		__ptr = (h)->realloc((h)->arg, (ptr), 0);	\
+	else							\
+		__ptr = realloc((ptr), 0);			\
+	__ptr; })
+#else
+# define mh_calloc(h, nmemb, size) ({			\
 	size_t __size = (size) * (nmemb);		\
 	void *__ptr = (h)->realloc(NULL, __size);	\
 	memset(__ptr, 0, __size);			\
 	__ptr; })
-#define mh_free(h, ptr) (h)->realloc((ptr), 0)
+# define mh_free(h, ptr) (h)->realloc((ptr), 0)
+#endif
 
 #ifdef MH_DEBUG
 MH_DECL void _mh(dump)(struct mhash_t *h);
@@ -853,6 +884,23 @@ _mh(hijack_slot_free)(struct mhash_t *d, uint32_t dx)
 #endif
 
 MH_DECL struct mhash_t *
+#ifdef mh_arg_t
+_mh(init)(void *(*custom_realloc)(mh_arg_t, void *, size_t), mh_arg_t arg)
+{
+	struct mhash_t *h;
+
+	if (custom_realloc)
+		h = custom_realloc(arg, NULL, sizeof(*h));
+	else
+		h = realloc(NULL, sizeof(*h));
+	memset(h, 0, sizeof(*h));
+
+	h->realloc = custom_realloc;
+	_mh(initialize)(h, arg);
+
+	return h;
+}
+#else
 _mh(init)(void *(*custom_realloc)(void *, size_t))
 {
 	custom_realloc = custom_realloc ?: realloc;
@@ -862,11 +910,22 @@ _mh(init)(void *(*custom_realloc)(void *, size_t))
 	_mh(initialize)(h);
 	return h;
 }
+#endif
 
 MH_DECL void
+#ifdef mh_arg_t
+_mh(initialize)(struct mhash_t *h, mh_arg_t arg)
+#else
 _mh(initialize)(struct mhash_t *h)
+#endif
 {
+#ifdef mh_arg_t
+	// First of all, initialize `arg' because it may be used by custom realloc
+	h->arg = arg;
+#else
 	h->realloc = h->realloc ?: realloc;
+#endif
+
 	h->node_size = h->node_size ?: sizeof(mh_slot_t);
 
 	h->shadow = mh_calloc(h, 1, sizeof(*h));
@@ -1013,8 +1072,17 @@ _mh(bytes)(struct mhash_t *h)
 MH_DECL void
 _mh(clear)(struct mhash_t *h)
 {
+#ifdef mh_arg_t
+	mh_arg_t arg = h->arg;
+#endif
+
 	_mh(destruct)(h);
+
+#ifdef mh_arg_t
+	_mh(initialize)(h, arg);
+#else
 	_mh(initialize)(h);
+#endif
 }
 
 MH_DECL void
@@ -1099,7 +1167,6 @@ _mh(dump)(struct mhash_t *h)
 #undef mh_dirty
 #undef mh_setdirty
 
-#undef mh_malloc
 #undef mh_calloc
 #undef mh_free
 
